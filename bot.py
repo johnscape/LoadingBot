@@ -6,6 +6,10 @@ from discord.ext import commands
 from dotenv import load_dotenv
 from PIL import Image, ImageDraw, ImageFont
 import random
+from perlin_numpy import (
+    generate_fractal_noise_2d, generate_fractal_noise_3d,
+    generate_perlin_noise_2d, generate_perlin_noise_3d
+)
 import numpy as np
 
 load_dotenv()
@@ -13,64 +17,16 @@ TOKEN = os.getenv('DISCORD_TOKEN')
 ImageSize = (1092, 768)
 FontSize = 28
 DistanceFrom = (10, 40)
+FogCutoff = 0.4
 
 quoteList = [
     "I used to be an adventurer like you./Then I took an arrow in the knee.",
     "Watch Full HD Movies & TV Shows",
     "If you are fighting a Squad of archers,/it is a viable option to just drop prone at the end of your turn.",
     "That's a nice argument senator,/why don't you back up it with a source?",
-    "|   |i/||    | _"
+    "|   |i/||    | _",
+    "If you see Tim, you can ask him/to play Freebird."
 ]
-
-
-class PerlinSampler:
-    def __init__(self, seed, width, height):
-        self.Width = width
-        self.Height = height
-        self.Random = seed
-        self.Gradients = [0] * self.Width * self.Height * 2
-
-        np.random.seed(self.Random)
-        for i in range(len(self.Gradients)):
-            angle = np.random.randint(0, 2147483647) * math.pi * 2
-            x = math.sin(angle)
-            y = math.cos(angle)
-            self.Gradients[i] = x
-            self.Gradients[i + 1] = y
-            i += 1
-
-    def dot(self, cellX, cellY, vx, vy):
-        offset = (cellX + cellY * self.Width) * 2
-        wx = self.Gradients[offset]
-        wy = self.Gradients[offset + 1]
-        return wx * vx + wy * vy
-
-    def lerp(self, a, b, t):
-        return a + t * (b - a)
-
-    def curve(self, t):
-        return t * t * (3 - 2 * t)
-
-    def GetValue(self, x, y):
-        xCell = math.floor(x)
-        yCell = math.floor(y)
-        xFrac = x - xCell
-        yFrac = y - yCell
-
-        x0 = xCell
-        y0 = yCell
-        x1 = 0 if xCell == self.Width else xCell + 1
-        y1 = 0 if yCell == self.Height else yCell + 1
-
-        v00 = self.dot(x0, y0, xFrac, yFrac)
-        v10 = self.dot(x1, y0, xFrac - 1, yFrac)
-        v01 = self.dot(x0, y1, xFrac, yFrac - 1)
-        v11 = self.dot(x1, y1, xFrac - 1, yFrac - 1)
-
-        vx0 = self.lerp(v00, v10, self.curve(xFrac))
-        vx1 = self.lerp(v01, v11, self.curve(xFrac))
-
-        return self.lerp(vx0, vx1, self.curve(yFrac))
 
 
 def LoadQuotes():
@@ -85,55 +41,24 @@ def GetTextSize(text_string, font):
     return text_width, text_height
 
 
-def AddPerlinNoise(img: Image, seed: int, cellSize, levels, attenuation):
-    imgArray = np.asarray(img)
-    noise = PerlinSampler(
-        seed,
-        math.ceil(ImageSize[0] / cellSize),
-        math.ceil(ImageSize[1] / cellSize)
-    )
-    for x in range(ImageSize[0]):
-        for y in range(ImageSize[1]):
-            imgArray[x, y] = noise.GetValue(x, y)
-    # turbulance
-    raster = [0] * ImageSize[0] * ImageSize[1]
-    localPeriodInverse = 1 / cellSize
-    frequencyInverse = 1
-    att = 1
-    weight = 0
-    for l in range(levels):
-        sampler = PerlinSampler(
-            seed + l,
-            math.ceil(ImageSize[0] * localPeriodInverse),
-            math.ceil(ImageSize[1] * localPeriodInverse)
-        )
-
-        for x in range(ImageSize[0]):
-            for y in range(ImageSize[1]):
-                val = sampler.GetValue(x * localPeriodInverse, y * localPeriodInverse)
-                raster[(x + y * ImageSize[0])] += val * math.pow(frequencyInverse, attenuation)
-
-        weight += math.pow(frequencyInverse, attenuation)
-        frequencyInverse *= 5
-        localPeriodInverse *= 2
-        att *= attenuation
-
-    weightInverse = 1 / weight
-    for x in range(ImageSize[0]):
-        for y in range(ImageSize[1]):
-            raster[(x + y * ImageSize[0])] *= weightInverse
-    for x in range(ImageSize[0]):
-        for y in range(ImageSize[1]):
-            offset = (x + y * ImageSize[0])
-            r, g, b = raster[offset]
-            r = ((r + 1) / 2) * 255
-            g = ((g + 1) / 2) * 255
-            b = ((b + 1) / 2) * 255
-            imgArray[x, y] = (r, g, b)
-    img = Image.fromarray(np.uint8(imgArray))
-    img.show()
-
+def AddPerlinNoise(seed: int, cellSize, levels, attenuation):
+    np.random.seed(seed)
+    noise = generate_perlin_noise_2d((2048, 2048), (8, 8))
+    subHeight = math.ceil(ImageSize[1] * FogCutoff)
+    fog = noise[:subHeight, :ImageSize[0]]
+    fog += 1
+    fog /= 2
+    fog *= 255
+    fog /= 3
+    for i in range(100):
+        fog[i:i+1, :] *= (0.01 * i)
+    nullRow = np.zeros((1, ImageSize[0]))
+    for diff in range(ImageSize[1] - subHeight):
+        fog = np.vstack([nullRow, fog])
+    fog = np.repeat(fog[:, :, np.newaxis], 3, axis=2)
+    img = Image.fromarray(np.uint8(fog))
     return img
+
 
 def AddText(drawer):
     dir_path = os.path.dirname(os.path.realpath(__file__))
@@ -175,10 +100,9 @@ def AddText(drawer):
 
 
 def GenerateImage():
-    image = Image.new('RGB', ImageSize, (0, 0, 0))
-    drawer = ImageDraw.Draw(image)
     # create fog
-    AddPerlinNoise(image, 2, 64, 2, 1)
+    image = AddPerlinNoise(2, 64, 2, 1)
+    drawer = ImageDraw.Draw(image)
     # add text
     AddText(drawer)
 
